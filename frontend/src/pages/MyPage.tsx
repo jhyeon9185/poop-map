@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence, useInView } from 'framer-motion';
-import { generateProfileAvatar } from '../utils/avatar';
+import { generateProfileAvatar, generateItemAvatar } from '../utils/avatar';
 import { Navbar } from '../components/Navbar';
 import {
   ShoppingBag,
@@ -47,8 +47,11 @@ interface AvatarItem {
   emoji: string;
   name: string;
   type: '헤드' | '이펙트' | '마커';
+  rawType?: string; // 원본 타입 (AVATAR, EFFECT 등)
   owned: boolean;
   price?: number;
+  inventoryId?: string; // 인벤토리 ID (장착/해제 API 호출 시 필요)
+  isEquipped?: boolean; // 장착 여부
 }
 
 // ── FALLBACK 데이터 ───────────────────────────────────────────────────────
@@ -597,14 +600,20 @@ function HeroBanner({
                     boxShadow: '0 16px 48px rgba(27,67,50,0.12)',
                   }}
                 >
-                  {user?.id ? (
+                  {equippedItem?.id ? (
+                    <img
+                      src={generateItemAvatar(equippedItem.id, equippedItem.rawType || 'AVATAR')}
+                      alt={equippedItem.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : user?.id ? (
                     <img
                       src={generateProfileAvatar(user.id)}
                       alt={user.nickname || '프로필'}
                       className="w-full h-full object-cover"
                     />
                   ) : (
-                    equippedItem?.emoji ?? '💩'
+                    '💩'
                   )}
                 </div>
                 <div
@@ -879,6 +888,13 @@ function HomeTab({
   }));
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [currentPage, setCurrentPage] = useState(0);
+  const itemsPerPage = 12;
+
+  // shopTab 변경 시 페이지 리셋
+  useEffect(() => {
+    setCurrentPage(0);
+  }, [shopTab]);
 
   // 토스 페이먼츠 결제창 호출
   const handleTossPayment = async () => {
@@ -916,11 +932,28 @@ function HomeTab({
     if (!preview) return;
 
     if (preview.owned) {
-      // 이미 소유한 아이템 → 장착만
-      setEquipped(preview);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-      setPreview(null);
+      // 이미 소유한 아이템 → 장착 API 호출
+      if (!preview.inventoryId) {
+        alert('아이템 정보가 올바르지 않습니다.');
+        return;
+      }
+
+      try {
+        await api.post(`/shop/inventory/${preview.inventoryId}/toggle`);
+
+        // 서버 데이터 다시 가져오기 (isEquipped 상태 동기화)
+        await fetchShopData();
+        
+        // 유저 정보 전역 상태 다시 가져오기 (상단 아바타 캐시/상태 갱신)
+        await refreshUser();
+
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+        setPreview(null);
+      } catch (err: any) {
+        console.error('아이템 장착 실패:', err);
+        alert(err.message || '아이템 장착에 실패했습니다.');
+      }
     } else {
       // 미소유 아이템 → 구매 시도
       const userPoints = user?.points ?? 0;
@@ -930,19 +963,34 @@ function HomeTab({
         // 포인트 충분 → 구매 API 호출
         try {
           await api.post('/shop/purchase', { itemId: preview.id });
-          alert('아이템을 구매했습니다!');
 
           // 사용자 정보 새로고침 (포인트 업데이트)
           await refreshUser();
 
-          // 아이템 목록 새로고침 (owned 상태 업데이트)
+          // 아이템 목록 새로고침 (owned 상태 및 inventoryId 업데이트)
           await fetchShopData();
 
-          // 자동 장착
-          setEquipped(preview);
-          setSaved(true);
-          setTimeout(() => setSaved(false), 2000);
-          setPreview(null);
+          // 구매한 아이템 찾기 (새로 생성된 inventoryId 포함)
+          const response = await api.get<any[]>('/shop/inventory');
+          const newInventoryItem = Array.isArray(response)
+            ? response.find((inv) => String(inv.itemId) === preview.id)
+            : null;
+
+          if (newInventoryItem?.id) {
+            // 자동 장착 API 호출
+            await api.post(`/shop/inventory/${newInventoryItem.id}/toggle`);
+
+            // 최종 동기화
+            await fetchShopData();
+
+            alert('아이템을 구매하고 장착했습니다!');
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+            setPreview(null);
+          } else {
+            alert('아이템을 구매했지만 장착에 실패했습니다. 인벤토리에서 직접 장착해주세요.');
+            setPreview(null);
+          }
         } catch (err: any) {
           console.error('아이템 구매 실패:', err);
           alert(err.message || '아이템 구매에 실패했습니다.');
@@ -962,12 +1010,14 @@ function HomeTab({
       animate={inView ? 'show' : 'hidden'}
       className="flex flex-col gap-8"
     >
-      {/* ★ 아바타 커스터마이징 섹션 (개편 및 사이즈 업) */}
+      {/* ★ 아바타 커스터마이징 섹션 (심리스 듀얼 패널 대시보드) */}
       <motion.div
         variants={fadeUp(0)}
-        className="bg-white rounded-[40px] border border-gray-100 shadow-sm overflow-hidden"
+        className="bg-white rounded-[40px] border border-gray-100 shadow-sm overflow-hidden flex flex-col md:flex-row min-h-[700px]"
       >
-        <div className="flex items-center justify-between px-10 pt-10 pb-8">
+        {/* 왼쪽: 인벤토리 메인 영역 */}
+        <div className="flex-1 flex flex-col border-b md:border-b-0 md:border-r border-gray-100">
+          <div className="flex items-center justify-between px-10 pt-10 pb-8">
           <div>
             <p className="text-sm font-black text-gray-400 uppercase tracking-widest mb-1.5">
               Avatar Customizing
@@ -1027,7 +1077,7 @@ function HomeTab({
           </div>
         </div>
 
-        <div className="px-6 pb-4">
+        <div className="px-6 pb-6">
           <AnimatePresence mode="wait">
             <motion.div
               key={shopTab}
@@ -1036,55 +1086,150 @@ function HomeTab({
               exit={{ opacity: 0, y: -12 }}
               transition={{ duration: 0.25 }}
             >
-              {deckCards.length > 0 ? (
-                <DepthDeckCarousel
-                  cards={deckCards}
-                  onSelect={(id) => {
-                    const item = items.find((i) => i.id === id);
-                    if (item) setPreview(item);
-                  }}
-                  cardWidth={180}
-                  cardHeight={240}
-                />
+              {items.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                    {items
+                      .slice(currentPage * itemsPerPage, (currentPage + 1) * itemsPerPage)
+                      .map((item, idx) => {
+                        const avatarType = item.rawType || 'AVATAR';
+                        const isSelected = preview?.id === item.id;
+                        const isOwned = item.owned;
+                        const color = isOwned ? '#2D6A4F' : '#E8A838';
+
+                        return (
+                          <motion.div
+                            key={item.id}
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: idx * 0.03 }}
+                            onClick={() => setPreview(item)}
+                            className={`group cursor-pointer rounded-[24px] border-2 transition-all overflow-hidden ${
+                              isSelected
+                                ? 'border-emerald-500 shadow-2xl shadow-emerald-500/20'
+                                : 'border-gray-100 hover:border-emerald-200 hover:shadow-xl'
+                            }`}
+                            style={{ background: '#fff' }}
+                          >
+                            <div className="aspect-square bg-black/[0.02] flex items-center justify-center relative overflow-hidden p-4">
+                              <div
+                                className="w-12 h-12 rounded-full blur-2xl opacity-20 absolute"
+                                style={{ background: color }}
+                              />
+                              <img
+                                src={generateItemAvatar(item.id, avatarType)}
+                                alt={item.name}
+                                className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-500"
+                              />
+                              {isOwned && (
+                                <div className="absolute top-2 right-2 w-7 h-7 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-lg">
+                                  <Check size={14} strokeWidth={3} />
+                                </div>
+                              )}
+                            </div>
+                            <div className="p-3 border-t border-gray-100">
+                              <h5 className="font-black text-sm mb-1 text-black truncate">{item.name}</h5>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-bold text-gray-400 uppercase">{item.type}</span>
+                                <span className="font-black text-sm" style={{ color }}>
+                                  {isOwned ? '보유중' : `${item.price?.toLocaleString()}P`}
+                                </span>
+                              </div>
+                            </div>
+                          </motion.div>
+                        );
+                      })}
+                  </div>
+
+                  {/* 페이징 */}
+                  {Math.ceil(items.length / itemsPerPage) > 1 && (
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
+                        disabled={currentPage === 0}
+                        className="px-4 py-2 rounded-xl font-bold text-sm transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      >
+                        이전
+                      </button>
+                      <span className="text-sm font-bold text-gray-400 px-4">
+                        {currentPage + 1} / {Math.ceil(items.length / itemsPerPage)}
+                      </span>
+                      <button
+                        onClick={() => setCurrentPage(Math.min(Math.ceil(items.length / itemsPerPage) - 1, currentPage + 1))}
+                        disabled={currentPage >= Math.ceil(items.length / itemsPerPage) - 1}
+                        className="px-4 py-2 rounded-xl font-bold text-sm transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      >
+                        다음
+                      </button>
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="flex items-center justify-center h-52 text-lg font-bold text-gray-300">
-                  아이템이 없어요
+                  {shopTab === 'inventory' ? '보유한 아이템이 없어요' : '판매 중인 아이템이 없어요'}
                 </div>
               )}
             </motion.div>
           </AnimatePresence>
         </div>
+      </div>
 
-        <p className="text-center text-sm font-semibold text-gray-300 py-4 italic tracking-wide">
+      <p className="text-center text-sm font-semibold text-gray-300 py-4 italic tracking-wide">
           클릭하거나 드래그해서 아바타를 꾸며보세요
         </p>
-
-        {/* 하단 구매/저장 바 (X 버튼 제거 및 가동성 개선) */}
-        <AnimatePresence>
-          {preview && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 15 }}
-              className="flex gap-4 px-10 pb-10 pt-4"
-            >
-              <WaveButtonComponent
-                onClick={handleSave}
-                variant={preview.owned ? 'primary' : 'accent'}
-                size="xl"
-                className="flex-1 shadow-2xl"
-                icon={saved || preview.owned ? <Check size={24} /> : <ShoppingBag size={24} />}
-              >
-                {saved
-                  ? '저장 완료!'
-                  : preview.owned
-                    ? '장착 완료 (저장)'
-                    : `${preview.price?.toLocaleString()}P 충전 후 구매하기`}
-              </WaveButtonComponent>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </motion.div>
+
+      {/* 전역 플로팅 인텔리전트 바 (데스크톱 & 모바일 통합 UX) */}
+      <AnimatePresence>
+        {preview && (
+          <motion.div
+            initial={{ opacity: 0, y: 100 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 100 }}
+            className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[200] w-[90%] max-w-[500px]"
+          >
+            <div 
+              className="flex items-center gap-5 p-4 rounded-[32px] border border-white/40 shadow-[0_30px_90px_rgba(0,0,0,0.2)] backdrop-blur-2xl"
+              style={{ background: 'rgba(255,255,255,0.92)' }}
+            >
+              <div className="w-14 h-14 rounded-2xl bg-emerald-50 flex-shrink-0 relative overflow-hidden group">
+                <img src={generateItemAvatar(preview.id, preview.rawType || 'AVATAR')} className="w-full h-full object-cover p-2 transition-transform group-hover:scale-110" />
+                <div className="absolute inset-0 bg-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </div>
+              
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[9px] font-black text-emerald-600 bg-emerald-100/50 px-2 py-0.5 rounded-full uppercase tracking-tighter">
+                    {preview.type}
+                  </span>
+                </div>
+                <h4 className="text-base font-black text-[#1A2B27] truncate">{preview.name}</h4>
+                <p className="text-[10px] font-bold text-gray-400">
+                  {preview.owned ? (equipped?.id === preview.id ? '현재 장착 중' : '보유 중인 아이템') : `${preview.price?.toLocaleString()}P 필요`}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <WaveButtonComponent
+                  onClick={handleSave}
+                  variant={preview.owned ? 'primary' : 'accent'}
+                  size="sm"
+                  className="!px-6 !rounded-[20px] !h-11 shadow-lg"
+                  icon={saved || preview.owned ? <Check size={18} /> : <ShoppingBag size={18} />}
+                >
+                  {saved ? '저장됨' : preview.owned ? '장착하기' : '구매하기'}
+                </WaveButtonComponent>
+                <button 
+                  onClick={() => setPreview(null)}
+                  className="w-11 h-11 flex items-center justify-center rounded-[18px] bg-gray-50 text-gray-300 hover:bg-gray-100 hover:text-gray-900 transition-all"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* 데일리 AI 분석 섹션 (API 연동) */}
       <motion.div
@@ -2675,29 +2820,49 @@ export function MyPage({ openAuth }: { openAuth: (mode: 'login' | 'signup') => v
 
   const fetchShopData = useCallback(async () => {
     try {
-      const [resItems, resTitles] = await Promise.allSettled([
+      const [resItems, resTitles, resInventory] = await Promise.allSettled([
         api.get<any[]>('/shop/items'),
         api.get<any[]>('/shop/titles'),
+        api.get<any[]>('/shop/inventory'), // 인벤토리 추가
       ]);
 
       const itemsData = resItems.status === 'fulfilled' ? resItems.value : [];
       const titlesData = resTitles.status === 'fulfilled' ? resTitles.value : [];
+      const inventoryData = resInventory.status === 'fulfilled' ? resInventory.value : [];
 
       // 🚀 서버 데이터 정밀 매핑 (관리자 페이지 연동)
       // 데이터가 배열인지 한 번 더 검증 (방어적 코드)
       const safeItems = Array.isArray(itemsData) ? itemsData : [];
       const safeTitles = Array.isArray(titlesData) ? titlesData : [];
+      const safeInventory = Array.isArray(inventoryData) ? inventoryData : [];
+
+      // 인벤토리 맵 생성 (itemId -> { inventoryId, isEquipped })
+      const inventoryMap = new Map<string, { inventoryId: string; isEquipped: boolean }>();
+      safeInventory.forEach((inv) => {
+        if (inv.itemId) {
+          inventoryMap.set(String(inv.itemId), {
+            inventoryId: String(inv.id),
+            isEquipped: inv.isEquipped === true,
+          });
+        }
+      });
 
       const mappedItems: AvatarItem[] = safeItems.map((item) => {
         const itemType = item.type || 'AVATAR';
+        const itemId = String(item.id || Math.random());
+        const inventoryInfo = inventoryMap.get(itemId);
+
         return {
-          id: String(item.id || Math.random()),
+          id: itemId,
           emoji:
             item.imageUrl || (itemType === 'AVATAR' ? '🎭' : itemType === 'EFFECT' ? '✨' : '📍'),
           name: item.name || '알 수 없는 아이템',
           type: itemType === 'AVATAR' ? '헤드' : itemType === 'EFFECT' ? '이펙트' : '마커',
+          rawType: itemType, // 원본 타입 저장
           owned: item.owned === true || false,
           price: item.price || 0,
+          inventoryId: inventoryInfo?.inventoryId,
+          isEquipped: inventoryInfo?.isEquipped || false,
         };
       });
 
@@ -2718,8 +2883,14 @@ export function MyPage({ openAuth }: { openAuth: (mode: 'login' | 'signup') => v
       setAvatarItems(mappedItems);
       setTitles(mappedTitles);
 
-      const equip = mappedItems.find((i) => i.owned);
-      if (equip) setEquipped(equip);
+      // isEquipped가 true인 아이템 찾기
+      const equip = mappedItems.find((i) => i.isEquipped === true);
+      if (equip) {
+        setEquipped(equip);
+      } else {
+        // 장착된 아이템이 없으면 null로 초기화
+        setEquipped(null);
+      }
     } catch (err) {
       console.error('마이페이지 연동 실패 (Critical):', err);
     }

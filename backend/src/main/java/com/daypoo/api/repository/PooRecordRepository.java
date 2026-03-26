@@ -1,5 +1,7 @@
 package com.daypoo.api.repository;
 
+import com.daypoo.api.dto.UserRegionScoreProjection;
+import com.daypoo.api.dto.UserScoreProjection;
 import com.daypoo.api.entity.PooRecord;
 import com.daypoo.api.entity.User;
 import java.time.LocalDateTime;
@@ -32,4 +34,28 @@ public interface PooRecordRepository extends JpaRepository<PooRecord, Long> {
 
   @Query("SELECT COUNT(p) FROM PooRecord p WHERE p.user.id = :userId")
   long countByUserId(@Param("userId") Long userId);
+
+  // 지역별 기록 수
+  @Query("SELECT COUNT(p) FROM PooRecord p WHERE p.user = :user AND p.regionName = :region")
+  long countByUserAndRegionName(@Param("user") User user, @Param("region") String region);
+
+  // 지역별 고유 화장실 수
+  @Query(
+      "SELECT COUNT(DISTINCT p.toilet) FROM PooRecord p WHERE p.user = :user AND p.regionName = :region")
+  long countDistinctToiletsByUserAndRegionName(
+      @Param("user") User user, @Param("region") String region);
+
+  @Query("SELECT DISTINCT p.regionName FROM PooRecord p WHERE p.regionName IS NOT NULL")
+  List<String> findDistinctRegionNames();
+
+  @Query(
+      "SELECT p.user.id as userId, COUNT(p) as recordCount, COUNT(DISTINCT p.toilet) as uniqueToilets"
+          + " FROM PooRecord p GROUP BY p.user.id")
+  List<UserScoreProjection> findAllGlobalScores();
+
+  @Query(
+      "SELECT p.user.id as userId, p.regionName as regionName,"
+          + " COUNT(p) as recordCount, COUNT(DISTINCT p.toilet) as uniqueToilets"
+          + " FROM PooRecord p WHERE p.regionName IS NOT NULL GROUP BY p.user.id, p.regionName")
+  List<UserRegionScoreProjection> findAllRegionScores();
 }
